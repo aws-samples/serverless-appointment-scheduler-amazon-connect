@@ -1,0 +1,711 @@
+AWSTemplateFormatVersion: 2010-09-09
+Resources:
+  AppointmentSchedulerTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: date
+          AttributeType: S
+        - AttributeName: timeslot
+          AttributeType: S
+      KeySchema:
+        - AttributeName: date
+          KeyType: HASH
+        - AttributeName: timeslot
+          KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: '5'
+        WriteCapacityUnits: '5'
+      TableName: AppointmentsTable
+  AppointmentSchedulerPinpointApp:
+    Type: 'AWS::Pinpoint::App'
+    Properties:
+      Name: AppointmentSchedulerPinpointApp
+  PSMSC525ST:
+    Type: 'AWS::Pinpoint::SMSChannel'
+    Properties:
+      Enabled: 'true'
+      ApplicationId: !Ref AppointmentSchedulerPinpointApp
+    DependsOn:
+      - AppointmentSchedulerPinpointApp
+  AppointmentSchedulerPinpointPolicy:
+    Type: 'AWS::IAM::Policy'
+    DependsOn: 
+      - AppointmentSchedulerPinpointApp
+    Properties:
+      PolicyName: AppointmentSchedulerPinpointPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'mobiletargeting:SendMessages'
+            Resource: 
+              Fn::GetAtt: 
+                - AppointmentSchedulerPinpointApp
+                - Arn
+          - Effect: Allow
+            Action:
+              - 'firehose:ListDeliveryStreams'
+              - 'iam:ListRoles'
+              - 'kinesis:ListStreams'
+              - 's3:List*'
+              - 'ses:Describe*'
+              - 'ses:Get*'
+              - 'ses:List*'
+              - 'sns:ListTopics'
+            Resource: 
+              Fn::GetAtt: 
+                - AppointmentSchedulerPinpointApp
+                - Arn
+      Roles:
+        - !Ref AppointmentsLambdaRole
+  AppointmentsDynamoApiPolcy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: AppointmentsDynamoApiPolcy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'dynamodb:GetItem'
+              - 'dynamodb:PutItem'
+              - 'dynamodb:DeleteItem'
+              - 'dynamodb:Scan'
+              - 'dynamodb:UpdateItem'
+            Resource: 
+              Fn::GetAtt: 
+                - AppointmentSchedulerTable
+                - Arn
+      Roles:
+        - !Ref AppointmentsAPIRole
+  AppointmentsLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: AppointmentsLambdaRole
+      Description: >-
+        Role for the Appointment Scheduler Lambda to assume for access to
+        DynamoDB, Pinpoint and CloudWatch Logs.
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess'
+        - 'arn:aws:iam::aws:policy/CloudWatchLogsFullAccess'
+  OutboundContactLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: OutboundContactLambdaRole
+      Description: >-
+        Role for the Appointment Scheduler Outbound Contact Lambda to assume for
+        access to Connect and CloudWatch Logs.
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonConnect_FullAccess'
+        - 'arn:aws:iam::aws:policy/CloudWatchLogsFullAccess'
+  AppointmentScheduler:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: AppointmentScheduler
+      Code:
+        ZipFile: >
+          import json
+
+          import dateutil.parser
+
+          import time
+
+          import os
+
+          import math
+
+          import random
+
+          import logging
+
+          import re
+
+          import boto3
+
+          from datetime import datetime
+
+          from boto3.dynamodb.conditions import Key, Attr
+
+          dynamodb = boto3.resource('dynamodb', region_name=os.environ['AWS_REGION'])
+
+
+          logger = logging.getLogger()
+
+          logger.setLevel(logging.DEBUG)
+
+
+          """ --- Helpers to build responses which match the structure of the
+          necessary dialog actions --- """
+
+
+          def delegate(session_attributes, slots):
+              return {
+                  'sessionAttributes': session_attributes,
+                  'dialogAction': {
+                      'type': 'Delegate',
+                      'slots': slots
+                  }
+              }
+
+          """ --- Helper Functions --- """
+
+
+
+          def parse_int(n):
+              try:
+                  return int(n)
+              except ValueError:
+                  return float('nan')
+
+
+          def try_ex(func):
+              """
+              Call passed in function in try block. If KeyError is encountered return None.
+              This function is intended to be used to safely access dictionary.
+
+              Note that this function would have negative impact on performance.
+              """
+
+              try:
+                  return func()
+              except KeyError:
+                  return None
+
+
+          """ --- Functions that control the bot's behavior --- """
+
+
+          def foramt_num(user_phone):
+              pt1=user_phone[0:3]
+              pt2=user_phone[3:6]
+              pt3=user_phone[6:10]
+              return('+1'+'-'+pt1+'-'+pt2+'-'+pt3)
+
+          def send_messages(user_phone, text2sms):
+              pinpoint = boto3.client('pinpoint')
+              tonumber = user_phone
+              messages = text2sms
+              response = pinpoint.send_messages(
+                  ApplicationId=os.environ['PINPOINT_ID'],
+                  MessageRequest={
+                      'Addresses': {
+                          tonumber : {'ChannelType': 'SMS'}
+                      },
+                      'MessageConfiguration': {
+                          'SMSMessage': {
+                              'Body': messages,
+                              'MessageType': 'TRANSACTIONAL'
+                          }
+                      }
+                  }
+              )
+              return response['ResponseMetadata']['HTTPStatusCode']
+              
+          def putItemInDDB(w_date,w_time,w_name, w_location, w_phone):
+              table = dynamodb.Table('AppointmentsTable')
+              
+              put_response = table.put_item(
+                 Item={
+                      'date': w_date,
+                      'timeslot': w_time,
+                      'fname': w_name,
+                      'store': w_location,
+                      'phone': w_phone,
+                      'meeting': 'Scheduled',
+                      'notes': ''
+                  }
+              )
+              return (put_response ["ResponseMetadata"]["HTTPStatusCode"])
+              
+          def close(session_attributes, fulfillment_state, message, user_phone,
+          text2sms):
+              send_messages(user_phone, text2sms)
+              response = {
+                  'sessionAttributes': session_attributes,
+                  'dialogAction': {
+                      'type': 'Close',
+                      'fulfillmentState': fulfillment_state,
+                      'message': message
+                  }
+              }
+              print ("mynewresponse",response)
+              return response
+
+          def make_appointment(intent_request):
+              
+              appointment_type = intent_request['currentIntent']['slots']['AppointmentType']
+              date = intent_request['currentIntent']['slots']['Date']
+              appointment_time = intent_request['currentIntent']['slots']['Time']
+              user_name = intent_request['currentIntent']['slots']['Name']
+              user_phone = intent_request['currentIntent']['slots']['Phone']
+              # remove all non numeric characters and add + sign
+              user_phone = '+' + re.sub('[^0-9]', '', user_phone)
+              output_session_attributes = intent_request['sessionAttributes'] if intent_request['sessionAttributes'] is not None else {}
+              text2sms = 'Appointment Notification: Hey {} appointment is confirmed for {}. See you there!'.format(user_name, appointment_time)
+              putItemInDDB(date,appointment_time,user_name, 'Milano', user_phone)
+              return close(
+                  output_session_attributes,
+                  'Fulfilled',
+                  {
+                      'contentType': 'PlainText',
+                      'content': 'Thanks {}, your appointment is confirmed for {}, and we have texted the details at your number'.format(user_name, appointment_time)
+                  },
+                  user_phone,
+                  text2sms
+              )
+              
+
+
+          """ --- Intents --- """
+
+
+
+          def dispatch(intent_request):
+              """
+              Called when the user specifies an intent for this bot.
+              """
+
+              logger.debug('dispatch userId={}, intentName={}'.format(intent_request['userId'], intent_request['currentIntent']['name']))
+
+              intent_name = intent_request['currentIntent']['name']
+
+              # Dispatch to your bot's intent handlers
+              if intent_name == 'MakeAppointment':
+                  return make_appointment(intent_request)
+              raise Exception('Intent with name ' + intent_name + ' not supported')
+
+
+          """ --- Main handler --- """
+
+
+
+          def lambda_handler(event, context):
+              # By default, treat the user request as coming from the America/New_York time zone.
+              os.environ['TZ'] = 'America/New_York'
+              print('myevent',event)
+              time.tzset()
+              print(time.tzset())
+              logger.debug('event.bot.name={}'.format(event['bot']['name']))
+              
+              return dispatch(event)
+      Environment:
+        Variables:
+          PINPOINT_ID: PINPOINT_ID
+      Role: !GetAtt 
+        - AppointmentsLambdaRole
+        - Arn
+      Runtime: python3.8
+      Handler: index.lambda_handler
+    DependsOn:
+      - AppointmentsLambdaRole
+  AppointmentSchedulerOutboundContact:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: AppointmentSchedulerOutboundContact
+      Code:
+        ZipFile: |
+          import boto3
+          from os import environ
+
+          def lambda_handler(event, context):
+              
+              print('## EVENT')
+              print(event)
+
+              client = boto3.client('connect')
+
+              response = client.start_outbound_voice_contact(
+                  DestinationPhoneNumber = event['CustomerNumber'],
+                  ContactFlowId = os.environ['CONTACT_FLOW'],
+                  InstanceId = os.environ['INSTANCE_ID'],
+                  QueueId = os.environ['QUEUE_ID'],
+                  Attributes = {
+                      'first_name': event['FirstName']
+                  }
+              )
+
+              return response
+      Environment:
+        Variables:
+          CONTACT_FLOW: CONTACT_FLOW
+          INSTANCE_ID: INSTANCE_ID
+          QUEUE_ID: QUEUE_ID
+      Role: !GetAtt 
+        - OutboundContactLambdaRole
+        - Arn
+      Runtime: python3.8
+      Handler: index.lambda_handler
+    DependsOn:
+      - OutboundContactLambdaRole
+  Appointments:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Name: Appointments
+    DependsOn:
+      - AppointmentSchedulerOutboundContact
+  AGM14CX9:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: GET
+      ResourceId: !Ref ddb
+      RestApiId: !Ref Appointments
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+          ResponseModels: { "application/json": "Empty" }
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        IntegrationResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+          ResponseTemplates:
+            application/json: ''
+        RequestTemplates:
+          application/json: '{"TableName": "AppointmentsTable"}'
+        Credentials: 
+          Fn::GetAtt:
+            - AppointmentsAPIRole
+            - Arn
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:dynamodb:action/Scan"
+  OptionsMethodDDB:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      RestApiId: !Ref Appointments
+      ResourceId: !Ref ddb
+      HttpMethod: OPTIONS
+      Integration:
+        IntegrationResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+            method.response.header.Access-Control-Allow-Methods: "'GET, OPTIONS'"
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+          ResponseTemplates:
+            application/json: ''
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        Type: MOCK
+      MethodResponses:
+      - StatusCode: 200
+        ResponseModels:
+          application/json: 'Empty'
+        ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+  ddb:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      PathPart: ddb
+      RestApiId: !Ref Appointments
+      ParentId: !GetAtt 
+        - Appointments
+        - RootResourceId
+  AppointmentsAPIRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: AppointmentsAPIRole
+      Description: >-
+        Role for the Appointments API to assume for access to DynamoDB and
+        CloudWatch Logs.
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs'
+  AGM4VDZT:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: POST
+      ResourceId: !Ref delete
+      RestApiId: !Ref Appointments
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+          ResponseModels: { "application/json": "Empty" }
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        IntegrationResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+          ResponseTemplates:
+            application/json: ''
+        Credentials: 
+          Fn::GetAtt:
+            - AppointmentsAPIRole
+            - Arn
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:dynamodb:action/DeleteItem"
+  OptionsMethodDelete:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      RestApiId: !Ref Appointments
+      ResourceId: !Ref delete
+      HttpMethod: OPTIONS
+      Integration:
+        IntegrationResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+            method.response.header.Access-Control-Allow-Methods: "'POST, OPTIONS'"
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+          ResponseTemplates:
+            application/json: ''
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        Type: MOCK
+      MethodResponses:
+      - StatusCode: 200
+        ResponseModels:
+          application/json: 'Empty'
+        ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+  delete:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      PathPart: delete
+      RestApiId: !Ref Appointments
+      ParentId: !GetAtt 
+        - Appointments
+        - RootResourceId
+  AGM4NOIL:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: POST
+      ResourceId: !Ref done
+      RestApiId: !Ref Appointments
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+          ResponseModels: { "application/json": "Empty" }
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        IntegrationResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+          ResponseTemplates:
+            application/json: ''
+        Credentials: 
+          Fn::GetAtt:
+            - AppointmentsAPIRole
+            - Arn
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:dynamodb:action/UpdateItem"
+  OptionsMethodDone:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      RestApiId: !Ref Appointments
+      ResourceId: !Ref done
+      HttpMethod: OPTIONS
+      Integration:
+        IntegrationResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+            method.response.header.Access-Control-Allow-Methods: "'POST, OPTIONS'"
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+          ResponseTemplates:
+            application/json: ''
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        Type: MOCK
+      MethodResponses:
+      - StatusCode: 200
+        ResponseModels:
+          application/json: 'Empty'
+        ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+  done:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      PathPart: done
+      RestApiId: !Ref Appointments
+      ParentId: !GetAtt 
+        - Appointments
+        - RootResourceId
+  AGM1EQTL:
+    Type: 'AWS::ApiGateway::Method'
+    DependsOn: AppointmentSchedulerOutboundContact
+    Properties:
+      HttpMethod: POST
+      ResourceId: !Ref outcall
+      RestApiId: !Ref Appointments
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+          ResponseModels: { "application/json": "Empty" }
+      Integration:
+        IntegrationHttpMethod: POST
+        IntegrationResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+          ResponseTemplates:
+            application/json: ''
+        Type: AWS
+        Uri: !Sub >-
+            arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AppointmentSchedulerOutboundContact.Arn}/invocations
+  OptionsMethodOutcall:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      RestApiId: !Ref Appointments
+      ResourceId: !Ref outcall
+      HttpMethod: OPTIONS
+      Integration:
+        IntegrationResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+            method.response.header.Access-Control-Allow-Methods: "'POST, OPTIONS'"
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+          ResponseTemplates:
+            application/json: ''
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        Type: MOCK
+      MethodResponses:
+      - StatusCode: 200
+        ResponseModels:
+          application/json: 'Empty'
+        ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+  outcall:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      PathPart: outcall
+      RestApiId: !Ref Appointments
+      ParentId: !GetAtt 
+        - Appointments
+        - RootResourceId
+  ApiGatewayStage:
+    Type: 'AWS::ApiGateway::Stage'
+    Properties:
+      DeploymentId: !Ref ApiGatewayDeployment
+      Description: API Stage 0 for Appointment Scheduler
+      RestApiId: !Ref Appointments
+      StageName: dev
+  ApiGatewayDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+      Description: API Deployment for Appointments Scheduler
+      RestApiId: !Ref Appointments
+    DependsOn:
+      - AGM4NOIL
+      - AGM4VDZT
+      - AGM14CX9
+      - AGM1EQTL
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: appointment-scheduler-website
+  CloudFrontOriginAccessIdentity:
+    Type: 'AWS::CloudFront::CloudFrontOriginAccessIdentity'
+    DependsOn: WebsiteBucket
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Ref WebsiteBucket
+  WebsiteBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    DependsOn: WebsiteBucket
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub 'arn:aws:s3:::${WebsiteBucket}/*'
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOriginAccessIdentity.S3CanonicalUserId
+  AppointmentSchedulerCloudFront:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig: 
+        Origins:
+          - DomainName: !GetAtt
+              - WebsiteBucket
+              - RegionalDomainName
+            Id: !Ref WebsiteBucket
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub 'origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}'
+        Enabled: 'true'
+        HttpVersion: http2
+        DefaultRootObject: '/index.html'
+        DefaultCacheBehavior:
+          TargetOriginId: !Ref WebsiteBucket
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          Compress: false
+          ForwardedValues:
+            QueryString: 'true'
+            Cookies:
+              Forward: none
+            Headers:
+              - Access-Control-Request-Headers
+              - Access-Control-Request-Method
+              - Origin
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: 'true'
+          MinimumProtocolVersion: 'TLSv1.2_2021'
+    DependsOn:
+      - WebsiteBucket
