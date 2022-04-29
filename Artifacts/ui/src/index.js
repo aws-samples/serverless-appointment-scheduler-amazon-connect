@@ -19,21 +19,6 @@ import ViewColumn from "@material-ui/icons/ViewColumn";
 import "./index.css";
 import axios from "axios";
 import doneIcon from "./icon_done.png";
-import {
-  Inject,
-  ScheduleComponent,
-  ViewsDirective,
-  ViewDirective,
-  Day,
-  Week,
-  WorkWeek,
-  Month,
-  Agenda,
-  EventSettingsModel,
-  Resize,
-  DragAndDrop
-} from "@syncfusion/ej2-react-schedule";
-import { DateTimePickerComponent } from "@syncfusion/ej2-react-calendars";
 import autoBind from "react-autobind";
 import moment from "moment";
 
@@ -237,14 +222,7 @@ class App extends Component {
                       id="StartTime"
                       name="StartTime"
                       style={{ border: "none", width: '155px'}}
-                    />
-                  {/*<DateTimePickerComponent*/}
-                  {/*  format="dd/MM/yy hh:mm a"*/}
-                  {/*  id="StartTime"*/}
-                  {/*  data-name="StartTime"*/}
-                  {/*  value={new Date(props.startTime || props.StartTime)}*/}
-                  {/*  className="e-field"*/}
-                  {/*/>*/}
+                    />                  
                 </td>
               ) : (
                 ""
@@ -280,10 +258,8 @@ class App extends Component {
     );
   }
 
-  onPopupClose(args) {
-    console.log("this data", this.state.data);
-    if (args.type === "Editor" && args.data) {
-      console.log("!!!!!!", args.data);
+  onPopupClose(args) {    
+    if (args.type === "Editor" && args.data) {      
       let myHeaders = new Headers();
       myHeaders.append("Content-Type", "application/json");
       const raw = JSON.stringify({
@@ -328,159 +304,13 @@ class App extends Component {
     return (
       <div>
         <img
-          src="<optional-add-logo-here"
+          src="<optional-add-logo-here>"
           alt="icon"
           style={{
             height: 120
           }}
-        />
-        <div className="navigator">
-          {this.state.listView ? (
-            <div>
-              <button className="button-clicked" onClick={this.toListView}>
-                List View
-              </button>
-              <button
-                className="button-not-clicked"
-                onClick={this.toCalendarView}
-              >
-                Calendar View
-              </button>
-            </div>
-          ) : (
-            <div>
-              <button className="button-not-clicked" onClick={this.toListView}>
-                List View
-              </button>
-              <button className="button-clicked" onClick={this.toCalendarView}>
-                Calendar View
-              </button>
-            </div>
-          )}
-        </div>
-        {this.state.listView ? (
-          <div>
-            <div
-              style={{
-                maxWidth: "100%",
-                paddingRight: "170px",
-                paddingLeft: "170px"
-              }}
-            >
-              <MaterialTable
-                tableRef={this.tableRef}
-                columns={[
-                  { title: "Date", field: "date.S" },
-                  { title: "TimeSlot", field: "timeslot.S" },
-                  { title: "Name", field: "fname.S" },
-                  { title: "Phone", field: "phone.S" }
-                ]}
-                actions={[
-                  {
-                    icon: () => (
-                      <img
-                        style={{ height: 45 }}
-                        alt="call_icon"
-                        className="call_icon"
-                        src="https://freepngimg.com/download/web_design/44628-9-calling-image-free-clipart-hd.png"
-                      />
-                    ),
-                    tooltip: "Click-to-Call",
-                    title: "Call",
-                    onClick: (event, rowData) => {
-                      console.log(event, rowData);
-                      const params = {
-                        CustomerNumber: rowData.phone.S,
-                        FirstName: rowData.fname.S
-                      };
-                      axios.post(
-                        `https://<your-api-ID>.execute-api.<region>.amazonaws.com/dev/outcall`,
-                        params
-                      );
-                      console.log(`name.S`, rowData.phone.S, rowData.fname.S);
-                      window.open(
-                        "https://<your-instance-name>.awsapps.com/connect/ccp-v2/softphone",
-                        "_blank",
-                        "height=600,width=400"
-                      );
-                    }
-                  },
-                  {
-                    icon: () => (
-                      <img
-                        style={{ height: 55 }}
-                        alt="done"
-                        className="done"
-                        src={doneIcon}
-                      />
-                    ),
-                    tooltip: "Done",
-                    onClick: (event, rowData) => {
-                      //alert("Appointment Completed with " + rowData.fname.S);
-                      var myHeaders = new Headers();
-                      myHeaders.append("Content-Type", "application/json");
-                      var raw = JSON.stringify({
-                        TableName: "AppointmentsTable",
-                        Key: {
-                          date: { S: rowData.date.S },
-                          timeslot: { S: rowData.timeslot.S }
-                        }
-                      });
-
-                      var requestOptions = {
-                        method: "POST",
-                        headers: myHeaders,
-                        body: raw,
-                        redirect: "follow"
-                      };
-
-                      fetch(
-                        "https://<your-api-ID>.execute-api.<region>.amazonaws.com/dev/done",
-                        requestOptions
-                      )
-                        .then(response => response.text())
-                        .then(result => console.log(result))
-                        .catch(error => console.log("error", error));
-                      // console.log(`date.S`, rowData.date.S, rowData.timeslot.S);
-                      //window.location.reload(false);
-                      //this.tableRef.current.onClick();
-                    }
-                  }
-                ]}
-                data={query =>
-                  new Promise((resolve, reject) => {
-                    let url =
-                      "https://<your-api-ID>.execute-api.<region>.amazonaws.com/dev/ddb";
-                    fetch(url)
-                      .then(response => response.json())
-                      .then(result => {
-                        resolve({
-                          data: result.Items,
-                          totalCount: result.total
-                        });
-                      });
-                  })
-                }
-                title="Scheduled Appointments"
-                options={{
-                  rowStyle: {
-                    backgroundColor: "white"
-                  },
-                  headerStyle: {
-                    backgroundColor: "#E60011",
-                    color: "#FFF",
-                    fontWeight: "bold"
-                  },
-                  actionsColumnIndex: -1,
-                  pageSize: 10,
-                  sorting: true,
-                  sortOrder: true
-                }}
-                icons={tableIcons}
-              />
-            </div>
-          </div>
-        ) : (
+        />        
+        <div>
           <div
             style={{
               maxWidth: "100%",
@@ -488,27 +318,117 @@ class App extends Component {
               paddingLeft: "170px"
             }}
           >
-            <ScheduleComponent
-              currentView="Month"
-              ref={schedule => (this.scheduleObj = schedule)}
-              eventSettings={{
-                allowAdding: false,
-                allowDeleting: false,
-                allowEditing: true,
-                dataSource: this.dataMapper(this.state.data)
+            <MaterialTable
+              tableRef={this.tableRef}
+              columns={[
+                { title: "Date", field: "date.S" },
+                { title: "TimeSlot", field: "timeslot.S" },
+                { title: "Name", field: "fname.S" },
+                { title: "Phone", field: "phone.S" }
+              ]}
+              actions={[
+                {
+                  icon: () => (
+                    <img
+                      style={{ height: 45 }}
+                      alt="call_icon"
+                      className="call_icon"
+                      src="https://freepngimg.com/download/web_design/44628-9-calling-image-free-clipart-hd.png"
+                    />
+                  ),
+                  tooltip: "Click-to-Call",
+                  title: "Call",
+                  onClick: (event, rowData) => {
+                    console.log(event, rowData);
+                    const params = {
+                      CustomerNumber: rowData.phone.S,
+                      FirstName: rowData.fname.S
+                    };
+                    axios.post(
+                      `https://<your-api-ID>.execute-api.<region>.amazonaws.com/dev/outcall`,
+                      params
+                    );
+                    console.log(`name.S`, rowData.phone.S, rowData.fname.S);
+                    window.open(
+                      "https://<your-instance-name>.awsapps.com/connect/ccp-v2/softphone",
+                      "_blank",
+                      "height=600,width=400"
+                    );
+                  }
+                },
+                {
+                  icon: () => (
+                    <img
+                      style={{ height: 55 }}
+                      alt="done"
+                      className="done"
+                      src={doneIcon}
+                    />
+                  ),
+                  tooltip: "Done",
+                  onClick: (event, rowData) => {                    
+                    var myHeaders = new Headers();
+                    myHeaders.append("Content-Type", "application/json");
+                    var raw = JSON.stringify({
+                      TableName: "AppointmentsTable",
+                      Key: {
+                        date: { S: rowData.date.S },
+                        timeslot: { S: rowData.timeslot.S }
+                      }
+                    });
+
+                    var requestOptions = {
+                      method: "POST",
+                      headers: myHeaders,
+                      body: raw,
+                      redirect: "follow"
+                    };
+
+                    fetch(
+                      "https://<your-api-ID>.execute-api.<region>.amazonaws.com/dev/done",
+                      requestOptions
+                    )
+                      .then(response => response.text())
+                      .then(result => console.log(result))
+                      .catch(error => console.log("error", error));                    
+                  }
+                }
+              ]}
+              data={query =>
+                new Promise((resolve, reject) => {
+                  let url =
+                    "https://<your-api-ID>.execute-api.<region>.amazonaws.com/dev/ddb";
+                  fetch(url)
+                    .then(response => response.json())
+                    .then(result => {
+                      resolve({
+                        data: result.Items,
+                        totalCount: result.total
+                      });
+                    });
+                })
+              }
+              title="Scheduled Appointments"
+              options={{
+                rowStyle: {
+                  backgroundColor: "white"
+                },
+                headerStyle: {
+                  backgroundColor: "#E60011",
+                  color: "#FFF",
+                  fontWeight: "bold"
+                },
+                actionsColumnIndex: -1,
+                pageSize: 10,
+                sorting: true,
+                sortOrder: true
               }}
-              quickInfoTemplates={{ content: this.contentTemplate.bind(this) }}
-              editorTemplate={this.editorTemplate.bind(this)}
-              popupClose={this.onPopupClose.bind(this)}
-            >
-              <Inject services={[Day, Week, WorkWeek, Month, Agenda]} />
-            </ScheduleComponent>
+              icons={tableIcons}
+            />
           </div>
-        )}
+        </div>        
       </div>
     );
   }
 }
 ReactDOM.render(<App />, document.getElementById("root"));
-// const rootElement = document.getElementById("root");
-// ReactDOM.render(<App />, rootElement);

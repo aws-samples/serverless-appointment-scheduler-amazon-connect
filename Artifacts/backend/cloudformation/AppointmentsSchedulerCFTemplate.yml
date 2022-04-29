@@ -40,24 +40,7 @@ Resources:
           - Effect: Allow
             Action:
               - 'mobiletargeting:SendMessages'
-            Resource: 
-              Fn::GetAtt: 
-                - AppointmentSchedulerPinpointApp
-                - Arn
-          - Effect: Allow
-            Action:
-              - 'firehose:ListDeliveryStreams'
-              - 'iam:ListRoles'
-              - 'kinesis:ListStreams'
-              - 's3:List*'
-              - 'ses:Describe*'
-              - 'ses:Get*'
-              - 'ses:List*'
-              - 'sns:ListTopics'
-            Resource: 
-              Fn::GetAtt: 
-                - AppointmentSchedulerPinpointApp
-                - Arn
+            Resource: !Join ['/', [!GetAtt AppointmentSchedulerPinpointApp.Arn, 'messages' ] ]                       
       Roles:
         - !Ref AppointmentsLambdaRole
   AppointmentsDynamoApiPolcy:
@@ -123,40 +106,25 @@ Resources:
     Properties:
       FunctionName: AppointmentScheduler
       Code:
-        ZipFile: >
+        ZipFile: |
           import json
-
           import dateutil.parser
-
           import time
-
           import os
-
           import math
-
           import random
-
           import logging
-
           import re
-
           import boto3
-
           from datetime import datetime
-
           from boto3.dynamodb.conditions import Key, Attr
 
           dynamodb = boto3.resource('dynamodb', region_name=os.environ['AWS_REGION'])
-
-
           logger = logging.getLogger()
-
           logger.setLevel(logging.DEBUG)
-
 
           """ --- Helpers to build responses which match the structure of the
           necessary dialog actions --- """
-
 
           def delegate(session_attributes, slots):
               return {
@@ -168,15 +136,11 @@ Resources:
               }
 
           """ --- Helper Functions --- """
-
-
-
           def parse_int(n):
               try:
                   return int(n)
               except ValueError:
                   return float('nan')
-
 
           def try_ex(func):
               """
@@ -191,18 +155,15 @@ Resources:
               except KeyError:
                   return None
 
-
           """ --- Functions that control the bot's behavior --- """
-
-
-          def foramt_num(user_phone):
+          def format_num(user_phone):
               pt1=user_phone[0:3]
               pt2=user_phone[3:6]
               pt3=user_phone[6:10]
               return('+1'+'-'+pt1+'-'+pt2+'-'+pt3)
 
           def send_messages(user_phone, text2sms):
-              pinpoint = boto3.client('pinpoint')
+              pinpoint = boto3.client('pinpoint', region_name=os.environ['AWS_REGION'])
               tonumber = user_phone
               messages = text2sms
               response = pinpoint.send_messages(
@@ -214,7 +175,8 @@ Resources:
                       'MessageConfiguration': {
                           'SMSMessage': {
                               'Body': messages,
-                              'MessageType': 'TRANSACTIONAL'
+                              'MessageType': 'TRANSACTIONAL',
+                              'OriginationNumber': os.environ['TOLL_FREE_NUMBER']
                           }
                       }
                   }
@@ -225,7 +187,7 @@ Resources:
               table = dynamodb.Table('AppointmentsTable')
               
               put_response = table.put_item(
-                 Item={
+                Item={
                       'date': w_date,
                       'timeslot': w_time,
                       'fname': w_name,
@@ -237,68 +199,64 @@ Resources:
               )
               return (put_response ["ResponseMetadata"]["HTTPStatusCode"])
               
-          def close(session_attributes, fulfillment_state, message, user_phone,
-          text2sms):
+          def close(session_attributes, fulfillment_state, message, user_phone, text2sms):
               send_messages(user_phone, text2sms)
               response = {
-                  'sessionAttributes': session_attributes,
-                  'dialogAction': {
-                      'type': 'Close',
-                      'fulfillmentState': fulfillment_state,
-                      'message': message
-                  }
+                  'sessionState' : {
+                      'sessionAttributes': session_attributes,
+                      'dialogAction': {
+                          'type': 'Close',
+                          'fulfillmentState': fulfillment_state
+                      },
+                      'intent' : {
+                          'confirmationState': 'Confirmed',
+                          'name': 'MakeAppointment',
+                          'state': 'Fulfilled'
+                      }
+                  },
+                  'messages': [message]
               }
               print ("mynewresponse",response)
               return response
 
-          def make_appointment(intent_request):
-              
-              appointment_type = intent_request['currentIntent']['slots']['AppointmentType']
-              date = intent_request['currentIntent']['slots']['Date']
-              appointment_time = intent_request['currentIntent']['slots']['Time']
-              user_name = intent_request['currentIntent']['slots']['Name']
-              user_phone = intent_request['currentIntent']['slots']['Phone']
+          def make_appointment(intent_request):             
+              appointment_type = intent_request['intent']['slots']['AppointmentType']['value']['interpretedValue']
+              date = intent_request['intent']['slots']['Date']['value']['interpretedValue']
+              appointment_time = intent_request['intent']['slots']['Time']['value']['interpretedValue']
+              user_name = intent_request['intent']['slots']['Name']['value']['interpretedValue']
+              user_phone = intent_request['intent']['slots']['Phone']['value']['interpretedValue']
               # remove all non numeric characters and add + sign
               user_phone = '+' + re.sub('[^0-9]', '', user_phone)
-              output_session_attributes = intent_request['sessionAttributes'] if intent_request['sessionAttributes'] is not None else {}
+              output_session_attributes = intent_request['sessionAttributes'] if 'sessionAttributes' in intent_request else {}
               text2sms = 'Appointment Notification: Hey {} appointment is confirmed for {}. See you there!'.format(user_name, appointment_time)
-              putItemInDDB(date,appointment_time,user_name, 'Milano', user_phone)
+              putItemInDDB(date,appointment_time,user_name, 'Store Location', user_phone)
               return close(
                   output_session_attributes,
                   'Fulfilled',
                   {
                       'contentType': 'PlainText',
-                      'content': 'Thanks {}, your appointment is confirmed for {}, and we have texted the details at your number'.format(user_name, appointment_time)
+                      'content': 'Thanks {}, your appointment is confirmed for {}, and we have texted the details to your number.'.format(user_name, appointment_time)
                   },
                   user_phone,
                   text2sms
               )
-              
-
 
           """ --- Intents --- """
-
-
-
           def dispatch(intent_request):
               """
               Called when the user specifies an intent for this bot.
               """
 
-              logger.debug('dispatch userId={}, intentName={}'.format(intent_request['userId'], intent_request['currentIntent']['name']))
+              logger.debug('dispatch userId={}, intentName={}'.format(intent_request['bot']['id'], intent_request['sessionState']['intent']['name']))
 
-              intent_name = intent_request['currentIntent']['name']
+              intent_name = intent_request['sessionState']['intent']['name']
 
               # Dispatch to your bot's intent handlers
               if intent_name == 'MakeAppointment':
-                  return make_appointment(intent_request)
+                  return make_appointment(intent_request['sessionState'])
               raise Exception('Intent with name ' + intent_name + ' not supported')
 
-
           """ --- Main handler --- """
-
-
-
           def lambda_handler(event, context):
               # By default, treat the user request as coming from the America/New_York time zone.
               os.environ['TZ'] = 'America/New_York'
@@ -306,11 +264,11 @@ Resources:
               time.tzset()
               print(time.tzset())
               logger.debug('event.bot.name={}'.format(event['bot']['name']))
-              
               return dispatch(event)
       Environment:
         Variables:
           PINPOINT_ID: PINPOINT_ID
+          TOLL_FREE_NUMBER: TOLL_FREE_NUMBER
       Role: !GetAtt 
         - AppointmentsLambdaRole
         - Arn
@@ -327,8 +285,7 @@ Resources:
           import boto3
           from os import environ
 
-          def lambda_handler(event, context):
-              
+          def lambda_handler(event, context): 
               print('## EVENT')
               print(event)
 
@@ -639,7 +596,7 @@ Resources:
   ApiGatewayDeployment:
     Type: 'AWS::ApiGateway::Deployment'
     Properties:
-      Description: API Deployment for Appointments Scheduler
+      Description: API Deployment for Appointment Scheduler
       RestApiId: !Ref Appointments
     DependsOn:
       - AGM4NOIL
@@ -649,7 +606,9 @@ Resources:
   WebsiteBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: appointment-scheduler-website
+      BucketName: !Sub
+        - 'appointment-scheduler-website-${RandomGUID}'
+        - { RandomGUID: !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId ]]]] }
   CloudFrontOriginAccessIdentity:
     Type: 'AWS::CloudFront::CloudFrontOriginAccessIdentity'
     DependsOn: WebsiteBucket

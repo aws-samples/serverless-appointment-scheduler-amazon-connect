@@ -1,8 +1,7 @@
 import boto3
 from os import environ
 
-def lambda_handler(event, context):
-    
+def lambda_handler(event, context): 
     print('## EVENT')
     print(event)
 
@@ -10,9 +9,9 @@ def lambda_handler(event, context):
 
     response = client.start_outbound_voice_contact(
         DestinationPhoneNumber = event['CustomerNumber'],
-        ContactFlowId = '<outbound-call-contact-flow-ID>',
-        InstanceId = '<connect-instance-ID>',
-        QueueId = '<outbound-queue-ID>',
+        ContactFlowId = os.environ['CONTACT_FLOW'],
+        InstanceId = os.environ['INSTANCE_ID'],
+        QueueId = os.environ['QUEUE_ID'],
         Attributes = {
             'first_name': event['FirstName']
         }
